@@ -33,7 +33,7 @@ public class JcsmpProductConsumer {
 
     @PostConstruct
     public void start() {
-
+        log.info("Starting JCSMP product consumer");
         properties.getProducts()
                 .forEach(this::createFlow);
     }
@@ -41,7 +41,7 @@ public class JcsmpProductConsumer {
     private void createFlow(
             String productName,
             ProductConfig config) {
-
+    log.info("Creating flow for product {}", productName);
         try {
             Queue queue =
                     JCSMPFactory.onlyInstance()
