@@ -1,0 +1,66 @@
+server:
+  port: 9177
+
+spring:
+  application:
+    name: multi-threading-engg-jcsmp
+
+solace:
+  jcsmp:
+    host: tcp://localhost:55555
+    vpn: TEST_SHAIK_BULK_VPN
+    username: admin
+    password: admin
+
+    # Client acknowledgement: ACK only after successful processing.
+    acknowledgement-mode: CLIENT
+
+    # Initial Guaranteed Messaging window.
+    # Tune after testing actual message sizes and throughput.
+    message-window-size: 10
+
+product-engine:
+  products:
+
+    PRODUCT_1:
+      queue: QUEUE_BULK_POLL_PRODUCT1_TEST
+
+      consumer:
+        concurrency: 5
+        max-unacked-messages: 5
+
+      rate-limit:
+        enabled: true
+        tps: 50
+
+      destination:
+        type: MOCK
+        processing-time-ms: 500
+
+    PRODUCT_2:
+      queue: QUEUE_BULK_POLL_PRODUCT2_TEST
+
+      consumer:
+        concurrency: 10
+        max-unacked-messages: 10
+
+      rate-limit:
+        enabled: true
+        tps: 100
+
+      destination:
+        type: MOCK
+        processing-time-ms: 200
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include:
+          - health
+          - info
+          - metrics
+
+logging:
+  level:
+    com.learn.shaik: INFO
