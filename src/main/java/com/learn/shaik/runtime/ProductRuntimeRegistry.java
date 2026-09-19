@@ -8,6 +8,7 @@ import jakarta.annotation.PostConstruct;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
+import jakarta.annotation.PreDestroy;
 
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -106,5 +107,27 @@ public class ProductRuntimeRegistry {
 
     public Map<String, ProductRuntime> getAll() {
         return Map.copyOf(runtimes);
+    }
+
+    @PreDestroy
+    public void shutdown() {
+
+        log.info("Shutting down all product runtimes");
+
+        runtimes.forEach(
+                (productName, runtime) -> {
+                    try {
+                        runtime.shutdown();
+                    } catch (Exception e) {
+                        log.error(
+                                "Failed to shutdown product runtime. product={}",
+                                productName,
+                                e
+                        );
+                    }
+                }
+        );
+
+        runtimes.clear();
     }
 }

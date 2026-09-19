@@ -41,6 +41,14 @@ public class JcsmpProductConsumer {
     private void createFlow(
             String productName,
             ProductConfig config) {
+        log.info(
+        "Creating JCSMP flow. product={} queue={} concurrency={} transportWindow={} maxUnacked={}",
+        productName,
+        config.getQueue(),
+        config.getConsumer().getConcurrency(),
+        config.getConsumer().getConcurrency(),
+        config.getConsumer().getMaxUnackedMessages()
+);
     log.info("Creating flow for product {}", productName);
         try {
             Queue queue =
@@ -55,6 +63,17 @@ public class JcsmpProductConsumer {
             flowProperties.setAckMode(
                     JCSMPProperties
                             .SUPPORTED_MESSAGE_ACK_CLIENT
+            );
+            /**
+             * Keep the JCSMP transport window aligned
+             * with the number of active worker slots.
+             *
+             * Example:
+             * concurrency = 2
+             * transport window = 2
+             */
+            flowProperties.setTransportWindowSize(
+                    config.getConsumer().getConcurrency()
             );
 
             flowProperties.setStartState(true);

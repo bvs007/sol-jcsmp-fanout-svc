@@ -34,39 +34,50 @@ public class ProductMessageListener
 
         try {
 
+            log.debug(
+                    "Message received. product={} messageId={} thread={}",
+                    productName,
+                    message.getMessageId(),
+                    Thread.currentThread().getName()
+            );
+
             ProductRuntime runtime =
                     runtimeRegistry.get(productName);
 
             ProductMessage productMessage =
                     convert(message);
 
-            runtime.process(productMessage);
+            log.debug(
+                    "Message converted. product={} requestId={}",
+                    productName,
+                    productMessage.getRequestId()
+            );
 
             /*
-             * ACK only after successful downstream processing.
+             * Submit the Solace message + domain message
+             * to the product's worker pool.
+             *
+             * ACK will happen inside the worker after
+             * successful destination processing.
              */
-            message.ackMessage();
-
-            log.debug(
-                    "Message acknowledged. product={} messageId={}",
-                    productName,
-                    message.getMessageId()
+            runtime.process(
+                    message,
+                    productMessage
             );
 
         } catch (Exception e) {
 
             log.error(
-                    "Message processing failed. product={} messageId={}",
+                    "Message submission failed. product={} messageId={}",
                     productName,
                     message.getMessageId(),
                     e
             );
 
             /*
-             * Deliberately do not ACK.
+             * Do NOT ACK.
              *
-             * Explicit failure settlement / DMQ policy
-             * will be added as the next reliability step.
+             * We will design the full-pool behavior next.
              */
         }
     }
@@ -76,16 +87,29 @@ public class ProductMessageListener
             throws Exception {
 
         byte[] payload =
-                message.getAttachmentByteBuffer() == null
-                        ? new byte[0]
-                        : message.getAttachmentByteBuffer()
-                                .array();
+                message.getBytes();
+
+        if (payload == null || payload.length == 0) {
+
+            throw new IllegalArgumentException(
+                    "Received message has an empty payload. " +
+                            "product=" + productName +
+                            ", messageId=" + message.getMessageId()
+            );
+        }
 
         String text =
                 new String(
                         payload,
                         StandardCharsets.UTF_8
                 );
+
+        log.debug(
+                "Message payload. product={} messageId={} payload={}",
+                productName,
+                message.getMessageId(),
+                text
+        );
 
         return objectMapper.readValue(
                 text,
