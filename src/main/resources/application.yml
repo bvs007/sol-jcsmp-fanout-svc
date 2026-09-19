@@ -26,8 +26,8 @@ product-engine:
       queue: QUEUE_BULK_POLL_PRODUCT1_TEST
 
       consumer:
-        concurrency: 5
-        max-unacked-messages: 5
+        concurrency: 20
+        max-unacked-messages: 50
 
       rate-limit:
         enabled: true
@@ -41,8 +41,8 @@ product-engine:
       queue: QUEUE_BULK_POLL_PRODUCT2_TEST
 
       consumer:
-        concurrency: 10
-        max-unacked-messages: 10
+        concurrency: 1
+        max-unacked-messages: 1
 
       rate-limit:
         enabled: true

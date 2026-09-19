@@ -2,17 +2,17 @@ package com.learn.shaik.jcsmp;
 
 import com.learn.shaik.config.ProductConfig;
 import com.learn.shaik.config.ProductEngineProperties;
+import com.learn.shaik.runtime.ProductRuntime;
 import com.learn.shaik.runtime.ProductRuntimeRegistry;
 import com.solacesystems.jcsmp.ConsumerFlowProperties;
 import com.solacesystems.jcsmp.FlowReceiver;
 import com.solacesystems.jcsmp.JCSMPException;
 import com.solacesystems.jcsmp.JCSMPFactory;
+import com.solacesystems.jcsmp.JCSMPSession;
 import com.solacesystems.jcsmp.JCSMPProperties;
 import com.solacesystems.jcsmp.Queue;
-import com.solacesystems.jcsmp.XMLMessageListener;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
-import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
@@ -21,128 +21,167 @@ import java.util.concurrent.ConcurrentHashMap;
 
 @Slf4j
 @Component
-@RequiredArgsConstructor
 public class JcsmpProductConsumer {
 
-    private final JcsmpSessionManager sessionManager;
+    private final JCSMPSession session;
+
     private final ProductEngineProperties properties;
+
     private final ProductRuntimeRegistry runtimeRegistry;
 
+    /*
+     * One FlowReceiver per product.
+     */
     private final Map<String, FlowReceiver> flows =
             new ConcurrentHashMap<>();
 
+public JcsmpProductConsumer(
+        JcsmpSessionManager sessionManager,
+        ProductEngineProperties properties,
+        ProductRuntimeRegistry runtimeRegistry) {
+
+    this.session = sessionManager.getSession();
+    this.properties = properties;
+    this.runtimeRegistry = runtimeRegistry;
+}
+    /**
+     * Starts all configured products.
+     */
     @PostConstruct
-    public void start() {
-        log.info("Starting JCSMP product consumer");
-        properties.getProducts()
-                .forEach(this::createFlow);
-    }
+    public void start()
+            throws JCSMPException {
 
-    private void createFlow(
-            String productName,
-            ProductConfig config) {
-        log.info(
-        "Creating JCSMP flow. product={} queue={} concurrency={} transportWindow={} maxUnacked={}",
-        productName,
-        config.getQueue(),
-        config.getConsumer().getConcurrency(),
-        config.getConsumer().getConcurrency(),
-        config.getConsumer().getMaxUnackedMessages()
-);
-    log.info("Creating flow for product {}", productName);
-        try {
-            Queue queue =
-                    JCSMPFactory.onlyInstance()
-                            .createQueue(config.getQueue());
+        for (Map.Entry<String, ProductConfig> entry
+                : properties.getProducts().entrySet()) {
 
-            ConsumerFlowProperties flowProperties =
-                    new ConsumerFlowProperties();
+            String productName =
+                    entry.getKey();
 
-            flowProperties.setEndpoint(queue);
+            ProductConfig config =
+                    entry.getValue();
 
-            flowProperties.setAckMode(
-                    JCSMPProperties
-                            .SUPPORTED_MESSAGE_ACK_CLIENT
-            );
-            /**
-             * Keep the JCSMP transport window aligned
-             * with the number of active worker slots.
-             *
-             * Example:
-             * concurrency = 2
-             * transport window = 2
-             */
-            flowProperties.setTransportWindowSize(
-                    config.getConsumer().getConcurrency()
-            );
-
-            flowProperties.setStartState(true);
-
-            XMLMessageListener listener =
-                    new ProductMessageListener(
-                            productName,
-                            runtimeRegistry
-                    );
-
-            FlowReceiver flow =
-                    sessionManager
-                            .getSession()
-                            .createFlow(
-                                    listener,
-                                    flowProperties
-                            );
-
-            flow.start();
-
-            flows.put(
+            startProduct(
                     productName,
-                    flow
-            );
-
-            log.info(
-                    "JCSMP flow started. product={} queue={} concurrency={} maxUnacked={}",
-                    productName,
-                    config.getQueue(),
-                    config.getConsumer().getConcurrency(),
-                    config.getConsumer().getMaxUnackedMessages()
-            );
-
-        } catch (JCSMPException e) {
-
-            throw new IllegalStateException(
-                    "Failed to create JCSMP flow for "
-                            + productName,
-                    e
-            );
+                    config);
         }
     }
 
-    @PreDestroy
-    public void stop() {
+    /**
+     * Creates one FlowReceiver for one product.
+     */
+    private void startProduct(
+            String productName,
+            ProductConfig config)
+            throws JCSMPException {
 
-        flows.forEach((productName, flow) -> {
-            try {
-                flow.close();
+        Queue queue =
+                JCSMPFactory
+                        .onlyInstance()
+                        .createQueue(
+                                config.getQueue());
 
-                log.info(
-                        "JCSMP flow stopped. product={}",
-                        productName
-                );
+        ConsumerFlowProperties flowProperties =
+                new ConsumerFlowProperties();
 
-            } catch (Exception e) {
+        flowProperties.setEndpoint(queue);
 
-                log.error(
-                        "Failed to close flow. product={}",
-                        productName,
-                        e
-                );
-            }
-        });
+        /*
+         * Client acknowledgement.
+         */
+        flowProperties.setAckMode(
+                JCSMPProperties
+                        .SUPPORTED_MESSAGE_ACK_CLIENT);
 
-        flows.clear();
+        /*
+         * JCSMP transport window.
+         *
+         * This is NOT our application concurrency control.
+         */
+        flowProperties.setTransportWindowSize(
+                config.getConsumer()
+                        .getConcurrency());
+
+        /*
+         * NULL listener is intentional.
+         *
+         * This creates a synchronous FlowReceiver.
+         */
+        FlowReceiver flow =
+                session.createFlow(
+                        null,
+                        flowProperties,
+                        null);
+
+        flow.start();
+
+        flows.put(
+                productName,
+                flow);
+
+        ProductRuntime runtime =
+                runtimeRegistry.getRequired(
+                        productName);
+
+        /*
+         * Start N application workers against
+         * this ONE FlowReceiver.
+         */
+        runtime.startWorkers(flow);
+
+        log.info(
+                "Synchronous JCSMP flow started. "
+                        + "product={} queue={} workers={} transportWindow={}",
+                productName,
+                config.getQueue(),
+                config.getConsumer()
+                        .getConcurrency(),
+                config.getConsumer()
+                        .getConcurrency());
     }
 
-    public int getFlowCount() {
-        return flows.size();
-    }
+    /**
+ * Stops all product workers and flows.
+ */
+@PreDestroy
+public void stop() {
+
+    log.info("Stopping JCSMP product consumers");
+
+    /*
+     * 1. Stop application workers first.
+     *
+     * ProductRuntime.shutdown() sets running=false
+     * and waits for the worker threads to finish.
+     */
+    runtimeRegistry.shutdown();
+
+    /*
+     * 2. Now that workers have stopped,
+     *    stop and close the FlowReceivers.
+     */
+    flows.forEach(
+            (productName, flow) -> {
+
+                try {
+
+                    flow.stop();
+                    flow.close();
+
+                    log.info(
+                            "JCSMP flow stopped. product={}",
+                            productName);
+
+                } catch (Exception e) {
+
+                    log.warn(
+                            "Failed to close JCSMP flow. product={}",
+                            productName,
+                            e);
+                }
+            });
+
+    flows.clear();
+
+    log.info("JCSMP product consumers stopped");
+}
 }

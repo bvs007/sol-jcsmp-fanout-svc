@@ -9,9 +9,9 @@ public class MockDestinationClient implements DestinationClient {
 
     private final long processingTimeMs;
 
-    public MockDestinationClient(ProductConfig config) {
+    public MockDestinationClient(ProductConfig.DestinationConfig config) {
         this.processingTimeMs =
-                config.getDestination().getProcessingTimeMs();
+                config.getProcessingTimeMs();
     }
 
     @Override

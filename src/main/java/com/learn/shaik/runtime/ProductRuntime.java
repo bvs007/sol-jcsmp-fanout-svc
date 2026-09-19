@@ -1,25 +1,33 @@
 package com.learn.shaik.runtime;
 
-import com.google.common.util.concurrent.RateLimiter;
 import com.learn.shaik.config.ProductConfig;
 import com.learn.shaik.destination.DestinationClient;
 import com.learn.shaik.model.ProductMessage;
 import com.solacesystems.jcsmp.BytesXMLMessage;
+import com.solacesystems.jcsmp.FlowReceiver;
 import lombok.extern.slf4j.Slf4j;
 
-import java.util.concurrent.SynchronousQueue;
-import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 
 @Slf4j
 public class ProductRuntime {
 
     private final String productName;
+
     private final ProductConfig config;
-    private final RateLimiter rateLimiter;
+
     private final DestinationClient destinationClient;
 
-    private final ThreadPoolExecutor workerPool;
+    /*
+     * This executor does NOT act as a message queue.
+     *
+     * It owns exactly N long-running worker threads.
+     */
+    private final ExecutorService workers;
+
+    private volatile boolean running;
 
     public ProductRuntime(
             String productName,
@@ -30,160 +38,214 @@ public class ProductRuntime {
         this.config = config;
         this.destinationClient = destinationClient;
 
-        /*
-         * Rate limiter is retained as-is for now.
-         *
-         * We will revisit where the permit acquisition
-         * should happen after the worker-pool behavior
-         * is verified.
-         */
-        this.rateLimiter =
-                config.getRateLimit().isEnabled()
-                        ? RateLimiter.create(
-                        config.getRateLimit().getTps())
-                        : null;
+        int concurrency =
+                config.getConsumer().getConcurrency();
+
+        this.workers =
+                Executors.newFixedThreadPool(concurrency);
+
+        log.info(
+                "Product runtime initialized. product={} workers={}",
+                productName,
+                concurrency);
+    }
+
+    /**
+     * Starts N workers.
+     *
+     * One FlowReceiver is shared by all workers.
+     */
+    public void startWorkers(FlowReceiver flow) {
+
+        if (running) {
+            log.warn(
+                    "Workers already running. product={}",
+                    productName);
+            return;
+        }
+
+        running = true;
 
         int concurrency =
                 config.getConsumer().getConcurrency();
 
-        /*
-         * No application-side waiting queue.
-         *
-         * SynchronousQueue has ZERO capacity.
-         *
-         * Therefore a submitted task must be handed
-         * directly to an available worker.
-         */
-        this.workerPool =
-                new ThreadPoolExecutor(
-                        concurrency,
-                        concurrency,
-                        0L,
-                        TimeUnit.MILLISECONDS,
-                        new SynchronousQueue<>(),
-                        new ThreadPoolExecutor.AbortPolicy()
-                );
+        for (int i = 0; i < concurrency; i++) {
+
+            int workerNumber = i + 1;
+
+            workers.submit(
+                    () -> workerLoop(
+                            flow,
+                            workerNumber));
+        }
 
         log.info(
-                "Product runtime initialized. product={} workers={} applicationQueueCapacity=0",
+                "Product workers started. product={} workers={}",
                 productName,
-                concurrency
-        );
+                concurrency);
     }
 
     /**
-     * Submit a message for processing.
+     * Long-running worker.
      *
-     * The Solace message is retained by the processing
-     * task so that ACK can happen only after successful
-     * downstream processing.
+     * Each worker:
+     *
+     * 1. Receives one message
+     * 2. Processes it
+     * 3. ACKs it after successful processing
+     * 4. Goes back to receive another message
      */
-    public void process(
-            BytesXMLMessage solaceMessage,
-            ProductMessage productMessage) {
+    private void workerLoop(
+            FlowReceiver flow,
+            int workerNumber) {
 
-        workerPool.execute(() -> {
+        String workerName =
+                "product-"
+                        + productName
+                        + "-worker-"
+                        + workerNumber;
+
+        log.info(
+                "Worker started. product={} worker={}",
+                productName,
+                workerName);
+
+        while (running) {
+
+            BytesXMLMessage message = null;
 
             try {
 
-                log.debug(
-                        "Worker started. product={} messageId={} requestId={} thread={}",
-                        productName,
-                        solaceMessage.getMessageId(),
-                        productMessage.getRequestId(),
-                        Thread.currentThread().getName()
-                );
-
                 /*
-                 * Rate limiting behavior remains unchanged
-                 * for this step.
+                 * Application-controlled synchronous receive.
+                 *
+                 * 1000ms timeout allows the worker to periodically
+                 * check the 'running' flag during shutdown.
                  */
-                if (rateLimiter != null) {
-                    rateLimiter.acquire();
+                message =
+                        flow.receive(1000);
+
+                if (message == null) {
+                    continue;
                 }
 
-                destinationClient.send(
+                log.debug(
+                        "Message received. product={} worker={} messageId={}",
                         productName,
-                        productMessage
-                );
+                        workerName,
+                        message.getMessageId());
 
                 /*
-                 * ACK ONLY after successful destination processing.
+                 * Process the message.
                  */
-                solaceMessage.ackMessage();
+                process(
+                        message,
+                        workerName);
+
+                /*
+                 * ACK ONLY after successful processing.
+                 */
+                message.ackMessage();
 
                 log.info(
-                        "Message acknowledged. product={} messageId={} requestId={} thread={}",
+                        "Message acknowledged. product={} worker={} messageId={}",
                         productName,
-                        solaceMessage.getMessageId(),
-                        productMessage.getRequestId(),
-                        Thread.currentThread().getName()
-                );
+                        workerName,
+                        message.getMessageId());
 
             } catch (Exception e) {
 
                 log.error(
-                        "Worker processing failed. product={} messageId={} requestId={}",
+                        "Message processing failed. product={} worker={} messageId={}",
                         productName,
-                        solaceMessage.getMessageId(),
-                        productMessage.getRequestId(),
-                        e
-                );
+                        workerName,
+                        message != null
+                                ? message.getMessageId()
+                                : null,
+                        e);
 
                 /*
-                 * DO NOT ACK.
+                 * DO NOT ACK here.
                  *
-                 * Retry / redelivery / DMQ behavior will
-                 * be designed separately.
+                 * Retry / redelivery / DMQ behaviour
+                 * will be designed separately.
                  */
             }
-        });
+        }
+
+        log.info(
+                "Worker stopped. product={} worker={}",
+                productName,
+                workerName);
     }
 
-    public String getProductName() {
-        return productName;
+    /**
+     * Processes one Solace message.
+     */
+    private void process(
+            BytesXMLMessage message,
+            String workerName)
+            throws Exception {
+
+        byte[] payload =
+                message.getBytes();
+
+        ProductMessage productMessage =
+                ProductMessageConverter.convert(
+                        payload);
+
+        log.info(
+                "Processing request. product={} worker={} requestId={}",
+                productName,
+                workerName,
+                productMessage.getRequestId());
+
+        destinationClient.send(
+                productName,
+                productMessage);
     }
 
-    public ProductConfig getConfig() {
-        return config;
-    }
-
-    public int getActiveWorkerCount() {
-        return workerPool.getActiveCount();
-    }
-
-    public int getPoolSize() {
-        return workerPool.getPoolSize();
-    }
-
+    /**
+     * Gracefully stops workers.
+     */
     public void shutdown() {
 
         log.info(
-                "Shutting down worker pool. product={}",
-                productName
-        );
+                "Stopping product runtime. product={}",
+                productName);
 
-        workerPool.shutdown();
+        running = false;
+
+        workers.shutdown();
 
         try {
 
-            if (!workerPool.awaitTermination(
+            if (!workers.awaitTermination(
                     10,
                     TimeUnit.SECONDS)) {
 
                 log.warn(
-                        "Worker pool did not terminate gracefully. product={}",
-                        productName
-                );
+                        "Workers did not terminate within timeout. "
+                                + "Forcing shutdown. product={}",
+                        productName);
 
-                workerPool.shutdownNow();
+                workers.shutdownNow();
             }
 
         } catch (InterruptedException e) {
 
             Thread.currentThread().interrupt();
 
-            workerPool.shutdownNow();
+            log.warn(
+                    "Interrupted while stopping workers. "
+                            + "Forcing shutdown. product={}",
+                    productName);
+
+            workers.shutdownNow();
         }
+
+        log.info(
+                "Product runtime stopped. product={}",
+                productName);
     }
 }
