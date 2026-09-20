@@ -67,13 +67,17 @@ product-engine:
         concurrency: 5
         max-unacked-messages: 5
 
-      rate-limit:
-        enabled: true
-        tps: 50
+        rate-limit:
+          enabled: true
+          tps: 50
 
       destination:
         type: MOCK
         processing-time-ms: 500
+
+        rate-limit:
+          enabled: true
+          tps: 20
 
     PRODUCT_2:
       queue: QUEUE_BULK_POLL_PRODUCT2_TEST
@@ -82,22 +86,28 @@ product-engine:
         concurrency: 10
         max-unacked-messages: 10
 
-      rate-limit:
-        enabled: true
-        tps: 100
+        rate-limit:
+          enabled: true
+          tps: 100
 
       destination:
         type: MOCK
         processing-time-ms: 200
+
+        rate-limit:
+          enabled: true
+          tps: 50
 ```
 
 | Property | Current purpose/status |
 |---|---|
 | `queue` | Solace durable queue associated with the product |
 | `consumer.concurrency` | Number of application worker threads |
-| `consumer.max-unacked-messages` | Present in configuration; application behavior is not currently implemented around this property |
-| `rate-limit.enabled` | Present in configuration; rate limiting is not yet wired into the current runtime |
-| `rate-limit.tps` | Configured TPS value; semantics/implementation are not yet finalized |
+| `consumer.max-unacked-messages` | Present in configuration; broker-side unacked-message control is intentionally not being used as the application control mechanism |
+| `consumer.rate-limit.enabled` | Enables application-side consumption throttling |
+| `consumer.rate-limit.tps` | Target application consumption rate before `receive()` |
+| `destination.rate-limit.enabled` | Enables application-side destination throttling |
+| `destination.rate-limit.tps` | Target rate for downstream destination admission |
 | `destination.type` | Destination implementation type |
 | `destination.processing-time-ms` | Processing delay for the current mock destination |
 
@@ -160,6 +170,62 @@ Solace Durable Queue
  ACK after successful processing
 ```
 
+## 6. Application Rate Limiting
+
+Rate limiting is now part of the current architecture. There are two independent application-side controls per product.
+
+```text
+Solace Queue
+    |
+    v
+Consumption RateLimiter
+    |
+    v
+flow.receive()
+    |
+    v
+N Workers
+    |
+    v
+Destination RateLimiter
+    |
+    v
+Destination
+    |
+    v
+ACK
+```
+
+### Consumption rate limiter
+
+The consumption limiter is acquired **before** `flow.receive()`. It controls how quickly the application admits messages from Solace.
+
+### Destination rate limiter
+
+The destination limiter is acquired after a message is received and before the downstream destination call. It controls how quickly the application invokes the destination.
+
+### Concurrency vs rate limiting
+
+These are separate controls:
+
+- **Concurrency** = number of messages processed in parallel.
+- **Consumption TPS** = how quickly the application consumes messages.
+- **Destination TPS** = how quickly downstream calls are admitted.
+
+A simplified effective-throughput relationship is:
+
+```text
+Effective TPS ≈ min(
+    Consumption TPS,
+    Destination TPS,
+    Concurrency / Processing Latency
+)
+```
+
+The current implementation uses **Guava `RateLimiter`** for conceptual clarity. The limiter is abstracted so that it can later be tuned/replaced with Bucket4j without changing the overall processing architecture.
+
+No application-owned queue has been introduced just to support rate limiting. Workers may block while waiting for a rate-limit permit.
+
 ## 6. Application Worker Model
 
 Each `ProductRuntime` creates a fixed-size worker pool based on:
@@ -172,10 +238,16 @@ consumer:
 The worker lifecycle is:
 
 ```text
+consumption rate limiter
+   |
+   v
 receive()
    |
    v
 deserialize
+   |
+   v
+destination rate limiter
    |
    v
 destination processing
@@ -470,8 +542,8 @@ destination/
 
 ### Not Yet Implemented / Finalized
 
-- [ ] Rate limiter implementation
-- [ ] Final meaning/semantics of configured TPS
+- [ ] Production tuning/replacement of Guava rate limiter (Bucket4j evaluation)
+- [ ] Distributed/global rate-limit semantics across multiple application instances
 - [ ] Retry policy
 - [ ] Redelivery strategy
 - [ ] Failure classification
@@ -483,10 +555,37 @@ destination/
 - [ ] Detailed observability
 - [ ] Production health checks
 - [ ] Advanced backpressure/admission control
+- [ ] Retry/redelivery/DMQ behavior
 - [ ] Configuration validation
 - [ ] Dynamic product onboarding/removal
 
-## 17. Important Design Notes
+## 17. Validation and Test Findings
+
+The rate-limiting design has been validated with local Solace tests using a mock destination.
+
+### Test observations
+
+With approximately 500 ms destination processing latency and 5 workers:
+
+```text
+Worker capacity ≈ 5 / 0.5
+                ≈ 10 TPS
+```
+
+Observed behavior across tests:
+
+| Consumption limit | Approx. observed throughput | Interpretation |
+|---:|---:|---|
+| 5 TPS | ~5 TPS | Consumption limiter is the bottleneck |
+| 10 TPS | ~10 TPS | Consumption limit and worker capacity are aligned |
+| 20 TPS | ~10 TPS | Worker/destination capacity is the bottleneck |
+| 100 TPS | ~10 TPS | Higher consumption limit does not increase throughput beyond worker capacity |
+
+The tests reinforce that configuring a high TPS value does not by itself increase throughput. The actual rate is constrained by the slowest relevant stage.
+
+The latest 100 TPS / 1000-message test is being used as the longer observation run for this behavior.
+
+## 18. Important Design Notes
 
 ### Worker concurrency is application-side concurrency
 
@@ -516,18 +615,14 @@ Approximate capacity = 5 / 0.5
 
 Therefore a future rate limiter must be considered together with downstream processing capacity.
 
-## 18. Development Principle
+## 19. Development Principle
 
 The implementation is being developed incrementally.
 
 **The current architecture is frozen at this stage.**
 
-Future features should be added one concept at a time, with the existing:
+Future features should be added one concept at a time, with the current controlled processing model kept stable unless there is a clear architectural reason to change it.
 
-```text
-receive -> process -> ACK
-```
+The current focus is rate limiting and throughput behavior. **Event Logging is intentionally parked for later** and should not influence the current processing-path design until its role and semantics are explicitly decided.
 
-model kept stable unless there is a clear architectural reason to change it.
-
-The next design change should be treated independently from the current frozen baseline.
+The next design change should be treated independently from the current baseline.
