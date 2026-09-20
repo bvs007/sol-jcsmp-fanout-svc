@@ -7,13 +7,12 @@ public class ProductConfig {
 
     private String queue;
     private ConsumerConfig consumer;
-    private RateLimitConfig rateLimit;
     private DestinationConfig destination;
 
     @Data
     public static class ConsumerConfig {
         private int concurrency;
-        private int maxUnackedMessages;
+        private RateLimitConfig rateLimit;
     }
 
     @Data

@@ -11,6 +11,10 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 
+import com.learn.shaik.ratelimit.impl.GuavaMessageRateLimiter;
+import com.learn.shaik.ratelimit.MessageRateLimiter;
+import com.learn.shaik.ratelimit.impl.NoOpMessageRateLimiter;
+
 @Slf4j
 public class ProductRuntime {
 
@@ -19,15 +23,17 @@ public class ProductRuntime {
     private final ProductConfig config;
 
     private final DestinationClient destinationClient;
+    private final ExecutorService workers;
+
+    private final MessageRateLimiter consumptionRateLimiter;
+
+    private volatile boolean running;
 
     /*
      * This executor does NOT act as a message queue.
      *
      * It owns exactly N long-running worker threads.
      */
-    private final ExecutorService workers;
-
-    private volatile boolean running;
 
     public ProductRuntime(
             String productName,
@@ -43,6 +49,9 @@ public class ProductRuntime {
 
         this.workers =
                 Executors.newFixedThreadPool(concurrency);
+
+        this.consumptionRateLimiter =
+        createConsumptionRateLimiter(config);
 
         log.info(
                 "Product runtime initialized. product={} workers={}",
@@ -115,6 +124,8 @@ public class ProductRuntime {
             BytesXMLMessage message = null;
 
             try {
+
+                 consumptionRateLimiter.acquire();
 
                 /*
                  * Application-controlled synchronous receive.
@@ -247,5 +258,22 @@ public class ProductRuntime {
         log.info(
                 "Product runtime stopped. product={}",
                 productName);
+    }
+
+    private MessageRateLimiter createConsumptionRateLimiter(
+            ProductConfig config) {
+
+        ProductConfig.RateLimitConfig rateLimit =
+                config.getConsumer().getRateLimit();
+
+        if (rateLimit == null ||
+                !rateLimit.isEnabled()) {
+            log.info("Rate Limit disabled for Product Name: {}", productName);
+            return new NoOpMessageRateLimiter();
+        }
+
+        log.info("Rate Limit: {}TPS for Product Name: {} of {} workers",  rateLimit.getTps(), productName, config.getConsumer().getConcurrency());
+        return new GuavaMessageRateLimiter(
+                rateLimit.getTps());
     }
 }

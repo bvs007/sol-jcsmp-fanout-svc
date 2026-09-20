@@ -27,7 +27,7 @@ import java.util.UUID;
 @Component
 public class JcsmpTestPublisher {
 
-    private static final int MAX_TEST_MESSAGES = 1000;
+    private static final int MAX_TEST_MESSAGES = 10000;
 
     private final JcsmpSessionManager sessionManager;
     private final ProductEngineProperties productProperties;

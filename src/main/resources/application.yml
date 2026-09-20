@@ -1,5 +1,5 @@
 server:
-  port: 9177
+  port: 8081
 
 spring:
   application:
@@ -11,47 +11,36 @@ solace:
     vpn: TEST_SHAIK_BULK_VPN
     username: admin
     password: admin
-
     # Client acknowledgement: ACK only after successful processing.
     acknowledgement-mode: CLIENT
-
     # Initial Guaranteed Messaging window.
     # Tune after testing actual message sizes and throughput.
     message-window-size: 10
 
 product-engine:
   products:
-
     PRODUCT_1:
       queue: QUEUE_BULK_POLL_PRODUCT1_TEST
-
       consumer:
-        concurrency: 20
+        concurrency: 5
         max-unacked-messages: 50
-
-      rate-limit:
-        enabled: true
-        tps: 50
-
+        rate-limit:
+          enabled: true
+          tps: 100
       destination:
         type: MOCK
         processing-time-ms: 500
-
     PRODUCT_2:
       queue: QUEUE_BULK_POLL_PRODUCT2_TEST
-
       consumer:
         concurrency: 1
         max-unacked-messages: 1
-
-      rate-limit:
-        enabled: true
-        tps: 100
-
+        rate-limit:
+          enabled: true
+          tps: 100
       destination:
         type: MOCK
         processing-time-ms: 200
-
 management:
   endpoints:
     web:
@@ -60,7 +49,6 @@ management:
           - health
           - info
           - metrics
-
 logging:
   level:
     com.learn.shaik: INFO

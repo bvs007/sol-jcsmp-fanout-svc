@@ -11,12 +11,10 @@ public class HttpDestinationClient implements DestinationClient {
     private final String baseUrl;
 
     public HttpDestinationClient(String baseUrl) {
-
         this.baseUrl = baseUrl;
-
         this.restClient = RestClient.builder()
-                .baseUrl(baseUrl)
-                .build();
+                                    .baseUrl(baseUrl)
+                                    .build();
     }
 
     @Override
